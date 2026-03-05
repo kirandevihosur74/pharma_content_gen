@@ -1,11 +1,12 @@
 """
 Ingest PDFs from approved_library/ as source of truth for prior approved claims and visual assets.
-Populates Chroma vector DB + SQLite for semantic search and compliance.
+Populates SQLite for compliance and keyword-based recommendations. No embeddings.
 """
 
+import hashlib
 import json
 import logging
-import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -15,8 +16,83 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 APPROVED_LIBRARY = Path(__file__).parent.parent / "approved_library"
+ASSETS_DIR = APPROVED_LIBRARY / "assets"
+ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp"}
 PRESCRIBING_INFO_PATTERN = "*prescribing*"
 STYLE_GUIDE_PATTERN = "*style*guide*"
+
+
+def _slug(filename: str) -> str:
+    """Create asset_id from filename: lowercase, alphanumeric + hyphens."""
+    base = Path(filename).stem
+    slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
+    return slug or "asset"
+
+
+def _compute_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ingest_approved_assets() -> dict:
+    """
+    Scan approved_library/assets/ and upsert into approved_assets table.
+    Returns {ingested, updated, errors}.
+    """
+    from database import SessionLocal, ApprovedAsset, init_db
+
+    init_db()
+    ingested = 0
+    updated = 0
+    errors = []
+
+    if not ASSETS_DIR.exists():
+        logger.warning("Assets directory not found at %s", ASSETS_DIR)
+        ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        return {"ingested": 0, "updated": 0, "errors": ["Created empty assets dir"]}
+
+    db = SessionLocal()
+    try:
+        for fpath in ASSETS_DIR.iterdir():
+            if not fpath.is_file() or fpath.suffix.lower() not in ALLOWED_EXTENSIONS:
+                continue
+            try:
+                sha = _compute_sha256(fpath)
+                filename = fpath.name
+                asset_id = _slug(filename)
+                source_doc = "STYLE_GUIDE" if "style" in filename.lower() else "ASSETS"
+                tags = json.dumps(["hero"] if "hero" in filename.lower() else ["logo"] if "logo" in filename.lower() else [])
+
+                existing = db.query(ApprovedAsset).filter(ApprovedAsset.asset_id == asset_id).first()
+                if existing:
+                    existing.filename = filename
+                    existing.sha256 = sha
+                    existing.source_doc = source_doc
+                    existing.tags = tags
+                    updated += 1
+                    logger.info("[assets] Updated %s (sha=%s)", asset_id, sha[:12])
+                else:
+                    db.add(ApprovedAsset(
+                        asset_id=asset_id,
+                        filename=filename,
+                        sha256=sha,
+                        source_doc=source_doc,
+                        source_page=None,
+                        tags=tags,
+                    ))
+                    ingested += 1
+                    logger.info("[assets] Ingested %s -> %s", filename, asset_id)
+            except Exception as e:
+                errors.append(f"{fpath.name}: {e}")
+                logger.exception("Asset ingestion failed for %s", fpath)
+        db.commit()
+    finally:
+        db.close()
+
+    return {"ingested": ingested, "updated": updated, "errors": errors}
 
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
@@ -36,13 +112,7 @@ def extract_claims_via_llm(pdf_text: str, source_name: str) -> list[dict]:
     """Use Claude to extract structured claims from prescribing info text."""
     import llm
 
-    if not llm.is_available():
-        logger.warning("LLM unavailable — cannot extract claims from PDF. Add ANTHROPIC_API_KEY.")
-        return []
-
     client = llm.get_client()
-    if not client:
-        return []
 
     prompt = f"""Extract prior approved pharmaceutical claims from this FDA prescribing information text.
 Source document: {source_name}
@@ -85,13 +155,7 @@ def extract_visual_assets_via_llm(pdf_text: str, source_name: str) -> list[dict]
     """Use Claude to extract visual asset guidelines from style guide text."""
     import llm
 
-    if not llm.is_available():
-        logger.warning("LLM unavailable — cannot extract visual assets from PDF.")
-        return []
-
     client = llm.get_client()
-    if not client:
-        return []
 
     prompt = f"""Extract visual asset and brand guidelines from this style guide text.
 Source document: {source_name}
@@ -136,7 +200,6 @@ def run_ingestion() -> dict:
     import uuid
 
     from database import SessionLocal, Claim, VisualAsset, init_db
-    import vector_store
 
     init_db()
     claims_added = 0
@@ -158,12 +221,7 @@ def run_ingestion() -> dict:
         db.query(Claim).delete()
         db.query(VisualAsset).delete()
         db.commit()
-        vector_store.clear_claims()
-        vector_store.clear_visual_assets()
         logger.info("Cleared existing claims and visual assets")
-
-        all_claims_for_vector = []
-        all_assets_for_vector = []
 
         for pdf_path in pdfs:
             name = pdf_path.name.lower()
@@ -178,29 +236,25 @@ def run_ingestion() -> dict:
                 if "prescribing" in name or "prescribing-information" in name or "prescribing_information" in name:
                     raw_claims = extract_claims_via_llm(text, source_name)
                     for c in raw_claims:
+                        verbatim = c["text"].strip()
+                        text_hash = hashlib.sha256(verbatim.encode("utf-8")).hexdigest()
+                        claim_id_slug = f"cl-{text_hash[:12]}"
                         cid = str(uuid.uuid4())
                         c["id"] = cid
                         claim = Claim(
                             id=cid,
-                            text=c["text"],
+                            claim_id=claim_id_slug,
+                            text=verbatim,
+                            verbatim_text=verbatim,
+                            text_sha256=text_hash,
                             citation=c.get("citation", source_name),
                             source="prior_approved",
+                            source_doc=source_name,
                             category=c.get("category", "efficacy"),
                             compliance_status="approved",
                             approved_date=c.get("approved_date"),
                         )
                         db.add(claim)
-                        all_claims_for_vector.append(
-                            {
-                                "id": cid,
-                                "text": c["text"],
-                                "citation": c.get("citation", source_name),
-                                "source": "prior_approved",
-                                "category": c.get("category", "efficacy"),
-                                "compliance_status": "approved",
-                                "approved_date": c.get("approved_date"),
-                            }
-                        )
                         claims_added += 1
                     db.commit()
 
@@ -217,27 +271,12 @@ def run_ingestion() -> dict:
                             metadata_json=a.get("metadata_json"),
                         )
                         db.add(asset)
-                        all_assets_for_vector.append(
-                            {
-                                "id": aid,
-                                "description": a.get("description", ""),
-                                "asset_type": a.get("asset_type", "guideline"),
-                                "source_pdf": source_name,
-                                "page_ref": a.get("page_ref"),
-                                "metadata_json": a.get("metadata_json"),
-                            }
-                        )
                         assets_added += 1
                     db.commit()
 
             except Exception as e:
                 errors.append(f"{source_name}: {str(e)}")
                 logger.exception("Ingestion failed for %s", pdf_path)
-
-        if all_claims_for_vector:
-            vector_store.add_claims(all_claims_for_vector)
-        if all_assets_for_vector:
-            vector_store.add_visual_assets(all_assets_for_vector)
 
     finally:
         db.close()

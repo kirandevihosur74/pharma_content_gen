@@ -1,4 +1,5 @@
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const BASE = API_BASE;
 
 function log(tag: string, ...args: unknown[]) {
   const ts = new Date().toISOString().slice(11, 23);
@@ -253,11 +254,34 @@ export async function getRecommendedClaims(sessionId: string) {
   return result;
 }
 
-export async function generateHtml(sessionId: string, claimIds: string[]) {
-  log("generate", `session_id=${sessionId}, ${claimIds.length} claims selected`);
+export interface AssetItem {
+  asset_id: string;
+  filename: string;
+  source_doc: string;
+  source_page?: string;
+  tags: string[];
+}
+
+export async function getAssets() {
+  log("getAssets", "Fetching approved assets");
+  const result = await request<{ assets: AssetItem[] }>("/assets");
+  log("getAssets", `${result.assets.length} assets loaded`);
+  return result;
+}
+
+export async function generateHtml(
+  sessionId: string,
+  claimIds: string[],
+  selectedAssetIds?: string[]
+) {
+  log("generate", `session_id=${sessionId}, ${claimIds.length} claims, ${selectedAssetIds?.length ?? 0} assets`);
   const result = await request<{ html: string; revision_number: number }>("/generate", {
     method: "POST",
-    body: JSON.stringify({ session_id: sessionId, claim_ids: claimIds }),
+    body: JSON.stringify({
+      session_id: sessionId,
+      claim_ids: claimIds,
+      selected_asset_ids: selectedAssetIds ?? [],
+    }),
   });
   log("generate", `Rev ${result.revision_number}, HTML ${result.html.length} chars`);
   return result;
@@ -293,14 +317,20 @@ export async function runComplianceReview(sessionId: string, claimIds: string[])
   return result;
 }
 
-export async function exportContent(sessionId: string, claimIds: string[]) {
+export async function exportContent(sessionId: string, claimIds: string[]): Promise<Blob> {
   log("export", `session_id=${sessionId}, ${claimIds.length} claims`);
-  const result = await request<ExportPackage>("/export", {
+  const res = await fetch(`${API_BASE}/export`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, claim_ids: claimIds }),
   });
-  log("export", `Package received — HTML ${result.html.length} chars, metadata keys: ${Object.keys(result.metadata).join(", ")}`);
-  return result;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Export failed: ${text}`);
+  }
+  const blob = await res.blob();
+  log("export", `Zip received — ${blob.size} bytes`);
+  return blob;
 }
 
 export async function getVersions(sessionId: string) {

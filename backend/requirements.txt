@@ -5,6 +5,4 @@ aiosqlite
 pydantic
 anthropic
 python-dotenv
-chromadb
-sentence-transformers
 pypdf

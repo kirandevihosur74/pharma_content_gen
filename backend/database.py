@@ -1,7 +1,7 @@
 import uuid
 import logging
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey, Integer, JSON, event
+from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey, Integer, JSON, event, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 logger = logging.getLogger(__name__)
@@ -47,9 +47,13 @@ class Message(Base):
 class Claim(Base):
     __tablename__ = "claims"
     id = Column(String, primary_key=True, default=new_uuid)
+    claim_id = Column(String, nullable=True, unique=True)  # stable slug for deterministic matching
     text = Column(Text, nullable=False)
+    verbatim_text = Column(Text, nullable=True)  # canonical exact text; equals text if set
+    text_sha256 = Column(String, nullable=True)  # sha256(verbatim_text)
     citation = Column(Text, nullable=False)
     source = Column(String, nullable=False, default="clinical_literature")
+    source_doc = Column(String, nullable=True)
     category = Column(String, nullable=False, default="efficacy")
     compliance_status = Column(String, nullable=False, default="approved")
     approved_date = Column(String, nullable=True)
@@ -67,6 +71,18 @@ class VisualAsset(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
+class ApprovedAsset(Base):
+    """Approved visual assets from approved_library/assets/ — enforced for compliance."""
+    __tablename__ = "approved_assets"
+    asset_id = Column(String, primary_key=True)
+    filename = Column(String, nullable=False)
+    sha256 = Column(String, nullable=False)
+    source_doc = Column(String, nullable=False, default="STYLE_GUIDE")
+    source_page = Column(String, nullable=True)
+    tags = Column(Text, nullable=True)  # JSON array of tags
+    created_at = Column(DateTime, default=utcnow)
+
+
 class Version(Base):
     __tablename__ = "versions"
     id = Column(String, primary_key=True, default=new_uuid)
@@ -75,6 +91,7 @@ class Version(Base):
     content_type = Column(String, nullable=False, default="email")
     revision_number = Column(Integer, nullable=False, default=1)
     claim_ids_used = Column(Text, nullable=True)
+    asset_ids_used = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
 
@@ -85,6 +102,26 @@ class Version(Base):
 def init_db():
     logger.info("Initializing database — creating tables if needed")
     Base.metadata.create_all(bind=engine)
+    _migrate_add_columns()
+
+
+def _migrate_add_columns():
+    """Add new columns to existing tables if missing (SQLite)."""
+    migrations = [
+        ("claims", "claim_id", "VARCHAR"),
+        ("claims", "verbatim_text", "TEXT"),
+        ("claims", "text_sha256", "VARCHAR"),
+        ("claims", "source_doc", "VARCHAR"),
+        ("versions", "asset_ids_used", "TEXT"),
+    ]
+    for table, col, col_type in migrations:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                conn.commit()
+            logger.info("Migration: added %s.%s", table, col)
+        except Exception:
+            pass  # column likely exists
 
 
 def get_db():

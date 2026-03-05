@@ -1,48 +1,33 @@
 """
 Anthropic Claude integration for pharma marketing content generation.
 
-Falls back to stub responses when ANTHROPIC_API_KEY is not set,
-so the app remains functional without an API key.
+Requires ANTHROPIC_API_KEY to be set.
 """
 
 import os
 import logging
-from typing import Optional, Generator
+from typing import Generator
 
 logger = logging.getLogger(__name__)
 
 _client = None
-_available = False
 
 MODEL = "claude-sonnet-4-20250514"
 
 
 def _get_client():
-    global _client, _available
+    global _client
     if _client is not None:
         return _client
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
-        logger.warning("ANTHROPIC_API_KEY not set — LLM features disabled, using stubs")
-        _available = False
-        return None
+        raise RuntimeError("ANTHROPIC_API_KEY is required. Set it in your environment.")
 
-    try:
-        import anthropic
-        _client = anthropic.Anthropic(api_key=api_key)
-        _available = True
-        logger.info("Anthropic client initialized successfully")
-        return _client
-    except Exception as e:
-        logger.error("Failed to initialize Anthropic client: %s", e)
-        _available = False
-        return None
-
-
-def is_available() -> bool:
-    _get_client()
-    return _available
+    import anthropic
+    _client = anthropic.Anthropic(api_key=api_key)
+    logger.info("Anthropic client initialized successfully")
+    return _client
 
 
 def get_client():
@@ -91,7 +76,7 @@ GENERATE_SYSTEM_PROMPT = """You are an expert pharmaceutical HTML content genera
 
 STRICT RULES:
 1. Output ONLY valid HTML — no markdown, no explanation, no preamble. Your entire response must be a single HTML document starting with <!DOCTYPE html>.
-2. ONLY use the exact claim text provided — never paraphrase, summarize, or invent clinical data.
+2. For each claim, use the placeholder {{CLAIM:claim_id}} where the claim text should appear. NEVER write claim text yourself — the system will replace placeholders with exact approved text.
 3. Every piece must include an Important Safety Information (ISI) section if efficacy claims are present (FDA fair balance).
 4. Include a References section citing the source of each claim used. Format: "This claim sourced from: [citation]"
 5. Include the legal footer: "FRUZAQLA is a registered trademark. © 2025 Takeda Pharmaceutical Company Limited. All rights reserved. US-FRZ-2500001 03/2025"
@@ -128,7 +113,8 @@ STRICT RULES:
 5. NEVER remove the "For US healthcare professionals only" designation.
 6. Maintain FDA fair balance — if efficacy claims are present, safety information must also be present.
 7. Preserve all inline CSS styling unless the edit specifically requests style changes.
-8. If the user's request would violate FDA compliance rules, make the closest compliant change and add an HTML comment noting the constraint.
+8. PRESERVE all elements with data-claim-id — do not remove, alter, or paraphrase the text inside them. The system will re-validate claim text.
+9. If the user's request would violate FDA compliance rules, make the closest compliant change and add an HTML comment noting the constraint.
 
 Apply the following edit instruction to the HTML below."""
 
@@ -138,12 +124,9 @@ Apply the following edit instruction to the HTML below."""
 def chat_reply(
     conversation_history: list[dict],
     session_context: dict,
-) -> Optional[str]:
+) -> str:
     """Generate an assistant reply for the briefing chat."""
     client = _get_client()
-    if not client:
-        logger.info("[LLM:chat] Client unavailable — returning None for stub fallback")
-        return None
 
     system = CHAT_SYSTEM_PROMPT.format(
         content_type=session_context.get("content_type", "email"),
@@ -182,18 +165,15 @@ def chat_reply(
         return reply
     except Exception as e:
         logger.error("[LLM:chat] Claude API call failed: %s", e, exc_info=True)
-        return None
+        raise
 
 
 def chat_reply_stream(
     conversation_history: list[dict],
     session_context: dict,
-) -> Optional[Generator[str, None, None]]:
+) -> Generator[str, None, None]:
     """Stream an assistant reply token-by-token for the briefing chat."""
     client = _get_client()
-    if not client:
-        logger.info("[LLM:chat_stream] Client unavailable — returning None for stub fallback")
-        return None
 
     system = CHAT_SYSTEM_PROMPT.format(
         content_type=session_context.get("content_type", "email"),
@@ -226,24 +206,21 @@ def chat_reply_stream(
         return _generate()
     except Exception as e:
         logger.error("[LLM:chat_stream] Claude streaming failed: %s", e, exc_info=True)
-        return None
+        raise
 
 
 def generate_content(
     claims: list[dict],
     session_context: dict,
     conversation_context: str,
-) -> Optional[str]:
+) -> str:
     """Generate HTML content from approved claims."""
     client = _get_client()
-    if not client:
-        logger.info("[LLM:generate] Client unavailable — returning None for stub fallback")
-        return None
 
     content_type = session_context.get("content_type", "email")
 
     claims_block = "\n".join(
-        f"- [{c['category'].upper()}] {c['text']} (Source: {c['citation']})"
+        f"- {{{{CLAIM:{c['claim_id']}}}}} — [{c['category'].upper()}] (Source: {c['citation']})"
         for c in claims
     )
 
@@ -256,9 +233,9 @@ def generate_content(
     )
 
     user_prompt = (
-        f"Generate a {content_type} using EXACTLY these approved claims:\n\n"
+        f"Generate a {content_type} using these claim placeholders (use {{{{CLAIM:claim_id}}}} in your HTML — do NOT write the claim text):\n\n"
         f"{claims_block}\n\n"
-        f"Output only the complete HTML document."
+        f"If you need a hero image area, insert {{{{ASSETS}}}}. Output only the complete HTML document."
     )
 
     logger.info(
@@ -288,18 +265,15 @@ def generate_content(
         return html
     except Exception as e:
         logger.error("[LLM:generate] Claude API call failed: %s", e, exc_info=True)
-        return None
+        raise
 
 
 def edit_content(
     current_html: str,
     instruction: str,
-) -> Optional[str]:
+) -> str:
     """Apply a natural-language edit to existing HTML content."""
     client = _get_client()
-    if not client:
-        logger.info("[LLM:edit] Client unavailable — returning None for stub fallback")
-        return None
 
     user_prompt = (
         f"EDIT INSTRUCTION: {instruction}\n\n"
@@ -332,4 +306,4 @@ def edit_content(
         return html
     except Exception as e:
         logger.error("[LLM:edit] Claude API call failed: %s", e, exc_info=True)
-        return None
+        raise

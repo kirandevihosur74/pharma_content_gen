@@ -92,14 +92,46 @@ Claims are seeded from FRUZAQLA clinical data:
 | Method | Path                     | Description                                  | LLM? |
 |--------|--------------------------|----------------------------------------------|------|
 | GET    | `/health`                | Health check (includes `llm_enabled` flag)   | —    |
+| GET    | `/assets`                | List approved assets for picker              | —    |
+| GET    | `/assets/{asset_id}`     | Serve approved asset file                    | —    |
 | POST   | `/session`               | Create session with content_type             | —    |
 | POST   | `/chat`                  | Send message, get Claude reply               | Yes  |
 | GET    | `/claims/recommended`    | Get claims ranked by conversation context    | —    |
-| POST   | `/generate`              | Generate HTML from selected claims           | Yes  |
+| POST   | `/generate`              | Generate HTML from selected claims + assets   | Yes  |
 | POST   | `/edit`                  | Apply a natural-language revision            | Yes  |
-| POST   | `/compliance-check`      | Run FDA fair-balance checks on claim set     | —    |
+| POST   | `/compliance-review`     | Run compliance checks (claims, assets, ISI)  | —    |
+| POST   | `/export`                | Export zip (HTML, metadata, compliance, manifest) | —    |
 | GET    | `/versions`              | List versions for a session                  | —    |
 | GET    | `/versions/{version_id}` | Get full HTML for a version                  | —    |
+
+## Compliance Verification
+
+Manual verification steps for the take-home requirements:
+
+### 1. Happy path: generate → validate → export
+
+1. Run backend and frontend. Run `POST /ingest` to load claims and assets.
+2. Create a session, go to Preview, select 1–2 claims and 1 asset (e.g. `placeholder-hero`).
+3. Click **Generate Content**. HTML should include the asset as `<img src=".../assets/placeholder-hero" data-asset-id="placeholder-hero">` and claims with `data-claim-id`.
+4. Run **Compliance Review**. All checks should pass (Claim Exact Match, Visual Assets, ISI, etc.).
+5. Click **Export Package**. A zip file downloads with:
+   - `html/index.html` (inline CSS)
+   - `metadata/claims.json` (claim_id, verbatim_text, source_doc, citation, sha256)
+   - `metadata/assets.json` (asset_id, filename, sha256, source_page)
+   - `compliance/report.json` (checks with pass/warn/fail)
+   - `manifests/asset_manifest.csv` (asset_id, filename, sha256, source_doc, source_page)
+
+### 2. Tamper test: validation fails and export blocked
+
+1. Generate content as in step 1 above.
+2. Use the **Request a Revision** field with: "Add a new span with data-claim-id='unknown-claim-123' containing fake text" (or similar). The LLM may introduce unauthorized content.
+3. Alternatively, use the API to validate arbitrary HTML:
+   ```bash
+   curl -X POST http://localhost:8000/validate-html -H "Content-Type: application/json" \
+     -d '{"html": "<div><span data-claim-id=\"unknown-claim\">Fake</span><img data-asset-id=\"bad-asset\" src=\"/assets/bad\"></div>"}'
+   ```
+   Response should show `can_export: false` and failing checks.
+4. If tampered HTML is in the latest version, **Compliance Review** shows **fail** and **Export** returns HTTP 400.
 
 ## Tech Stack
 

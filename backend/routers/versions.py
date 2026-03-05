@@ -1,0 +1,53 @@
+"""Version list and get."""
+
+import re
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session as DBSession
+
+from database import get_db, Version
+from schemas import VersionOut, VersionDetail
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+@router.get("/versions")
+def list_versions(session_id: str, db: DBSession = Depends(get_db)):
+    logger.info("[versions:list] session_id=%s", session_id)
+    versions = (
+        db.query(Version)
+        .filter(Version.session_id == session_id)
+        .order_by(Version.created_at.desc())
+        .all()
+    )
+    logger.info("[versions:list] Returning %d versions", len(versions))
+    return {
+        "versions": [
+            VersionOut(
+                id=v.id,
+                created_at=v.created_at.isoformat() if v.created_at else "",
+                html_preview=re.sub(r"<[^>]+>", "", v.html or "")[:120],
+                revision_number=v.revision_number or 0,
+                content_type=v.content_type or "email",
+            )
+            for v in versions
+        ]
+    }
+
+
+@router.get("/versions/{version_id}", response_model=VersionDetail)
+def get_version(version_id: str, db: DBSession = Depends(get_db)):
+    logger.info("[versions:get] Loading version_id=%s", version_id)
+    v = db.query(Version).filter(Version.id == version_id).first()
+    if not v:
+        logger.warning("[versions:get] Version not found: %s", version_id)
+        raise HTTPException(404, "Version not found")
+    logger.info("[versions:get] Found rev=%d, html_size=%d chars", v.revision_number or 0, len(v.html or ""))
+    return VersionDetail(
+        id=v.id,
+        created_at=v.created_at.isoformat() if v.created_at else "",
+        html=v.html,
+        revision_number=v.revision_number or 0,
+    )

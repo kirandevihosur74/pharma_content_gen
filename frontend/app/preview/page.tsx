@@ -3,17 +3,20 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
+  getSession,
   getRecommendedClaims,
+  getAssets,
   generateHtml,
   editHtml,
   getVersions,
   getVersion,
   runComplianceReview,
   exportContent,
+  API_BASE,
   type ClaimItem,
+  type AssetItem,
   type VersionItem,
   type ComplianceReviewResult,
-  type ExportPackage,
 } from "@/lib/api";
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -57,8 +60,11 @@ export default function PreviewPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [contentType, setContentType] = useState<string>("email");
   const [claims, setClaims] = useState<ClaimItem[]>([]);
+  const [assets, setAssets] = useState<AssetItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [html, setHtml] = useState("");
   const [revision, setRevision] = useState(0);
   const [editInstruction, setEditInstruction] = useState("");
@@ -66,6 +72,8 @@ export default function PreviewPage() {
   const [loading, setLoading] = useState("");
   const [review, setReview] = useState<ComplianceReviewResult | null>(null);
   const [showSource, setShowSource] = useState(true);
+  const [iframeHeight, setIframeHeight] = useState<number | null>(null);
+  const [bannerZoom, setBannerZoom] = useState(100);
 
   useEffect(() => {
     const sid = localStorage.getItem("session_id");
@@ -88,10 +96,15 @@ export default function PreviewPage() {
 
   useEffect(() => {
     if (!sessionId) return;
-    console.log("[Preview] Fetching claims and versions for session");
+    console.log("[Preview] Fetching session, claims, assets, and versions");
+    getSession(sessionId).then((s) => setContentType(s.content_type || "email"));
     getRecommendedClaims(sessionId).then(({ claims: c }) => {
       console.log("[Preview] %d claims loaded", c.length);
       setClaims(c);
+    });
+    getAssets().then(({ assets: a }) => {
+      console.log("[Preview] %d approved assets loaded", a.length);
+      setAssets(a);
     });
     refreshVersions();
   }, [sessionId, refreshVersions]);
@@ -99,8 +112,20 @@ export default function PreviewPage() {
   useEffect(() => {
     if (!iframeRef.current || !html) return;
     const doc = iframeRef.current.contentDocument;
-    if (doc) { doc.open(); doc.write(html); doc.close(); }
-  }, [html]);
+    if (doc) {
+      doc.open();
+      doc.write(html);
+      doc.close();
+      if (contentType !== "banner") {
+        const h = doc.documentElement.scrollHeight;
+        setIframeHeight(h > 0 ? h : null);
+      } else {
+        setIframeHeight(null);
+      }
+    }
+  }, [html, contentType]);
+
+  const isBanner = contentType === "banner";
 
   function toggleClaim(id: string) {
     setSelectedIds((prev) => {
@@ -137,10 +162,14 @@ export default function PreviewPage() {
 
   async function handleGenerate() {
     if (!sessionId || selectedIds.size === 0) return;
-    console.log("[Preview] Generating HTML — %d claims selected", selectedIds.size);
+    console.log("[Preview] Generating HTML — %d claims, %d assets", selectedIds.size, selectedAssetIds.length);
     setLoading("generate");
     try {
-      const { html: h, revision_number } = await generateHtml(sessionId, [...selectedIds]);
+      const { html: h, revision_number } = await generateHtml(
+        sessionId,
+        [...selectedIds],
+        selectedAssetIds
+      );
       console.log("[Preview] Generated rev %d, %d chars", revision_number, h.length);
       setHtml(h);
       setRevision(revision_number);
@@ -179,7 +208,8 @@ export default function PreviewPage() {
     setLoading("load");
     try {
       const v = await getVersion(versionId);
-      console.log("[Preview] Loaded rev %d, %d chars", v.revision_number, v.html.length);
+      const fromList = versions.find((x) => x.id === versionId);
+      if (fromList?.content_type) setContentType(fromList.content_type);
       setHtml(v.html);
       setRevision(v.revision_number);
     } catch (err) { console.error("[Preview] Load version failed:", err); }
@@ -191,26 +221,14 @@ export default function PreviewPage() {
     console.log("[Preview] Exporting content package — rev %d, %d claims", revision, selectedIds.size);
     setLoading("export");
     try {
-      const pkg: ExportPackage = await exportContent(sessionId, [...selectedIds]);
-      console.log("[Preview] Export package received — HTML %d chars, downloading files", pkg.html.length);
-
-      const blob = new Blob([JSON.stringify(pkg, null, 2)], { type: "application/json" });
+      const blob = await exportContent(sessionId, [...selectedIds]);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `fruzaqla-export-rev${revision}.json`;
+      a.download = `fruzaqla-export-rev${revision}.zip`;
       a.click();
       URL.revokeObjectURL(url);
-
-      const htmlBlob = new Blob([pkg.html], { type: "text/html" });
-      const htmlUrl = URL.createObjectURL(htmlBlob);
-      const a2 = document.createElement("a");
-      a2.href = htmlUrl;
-      a2.download = `fruzaqla-content-rev${revision}.html`;
-      a2.click();
-      URL.revokeObjectURL(htmlUrl);
-
-      console.log("[Preview] Export complete — 2 files downloaded");
+      console.log("[Preview] Export complete — zip downloaded");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Export failed";
       console.error("[Preview] Export failed:", msg);
@@ -234,6 +252,7 @@ export default function PreviewPage() {
           <h1 className="text-xl font-bold text-primary">Preview &amp; Generate</h1>
           <p className="text-xs text-muted mt-0.5">
             FRUZAQLA &middot; {selectedIds.size} claim{selectedIds.size !== 1 ? "s" : ""} selected
+            {selectedAssetIds.length > 0 && <span> &middot; {selectedAssetIds.length} asset{selectedAssetIds.length !== 1 ? "s" : ""}</span>}
             {revision > 0 && <span> &middot; Rev {revision}</span>}
           </p>
         </div>
@@ -312,6 +331,67 @@ export default function PreviewPage() {
           </div>
         )}
 
+        {/* Approved Assets Picker */}
+        {assets.length > 0 && (
+          <div className="mt-5 pt-5 border-t border-border">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-primary mb-2">
+              Approved Assets
+            </h3>
+            <p className="text-xs text-muted mb-3">
+              Select 1 logo (optional) and/or 1 hero image (optional). Max 2–3 assets. Only approved assets are inserted.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {assets.map((a) => {
+                const isHero = a.tags?.includes("hero") ?? a.filename.toLowerCase().includes("hero");
+                const isLogo = a.tags?.includes("logo") ?? a.filename.toLowerCase().includes("logo");
+                const role = isHero ? "Hero" : isLogo ? "Logo" : "Asset";
+                const selected = selectedAssetIds.includes(a.asset_id);
+                return (
+                  <label
+                    key={a.asset_id}
+                    className={`flex flex-col rounded-lg border overflow-hidden cursor-pointer transition-colors ${
+                      selected ? "bg-blue-50 border-blue-300 ring-2 ring-blue-200" : "border-border hover:bg-gray-50"
+                    }`}
+                  >
+                    <div className="aspect-video bg-gray-100 flex items-center justify-center p-2">
+                      <img
+                        src={`${API_BASE}/assets/${a.asset_id}`}
+                        alt={a.filename}
+                        className="max-w-full max-h-full object-contain"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = "none";
+                        }}
+                      />
+                    </div>
+                    <div className="p-2 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => {
+                          setSelectedAssetIds((prev) => {
+                            const next = prev.includes(a.asset_id)
+                              ? prev.filter((id) => id !== a.asset_id)
+                              : prev.length < 3
+                                ? [...prev, a.asset_id]
+                                : prev;
+                            return next;
+                          });
+                          setReview(null);
+                        }}
+                        className="accent-[var(--primary)] shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <span className="text-xs font-medium text-muted">{role}</span>
+                        <span className="text-sm block truncate" title={a.filename}>{a.filename}</span>
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div className="mt-5 flex items-center gap-3 flex-wrap">
           <button onClick={handleComplianceReview}
             disabled={selectedIds.size === 0 || loading === "compliance"}
@@ -374,17 +454,78 @@ export default function PreviewPage() {
       {/* HTML Preview */}
       {html && (
         <section className="bg-surface border border-border rounded-lg overflow-hidden">
-          <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+          <div className="px-5 py-3 border-b border-border flex items-center justify-between flex-wrap gap-2">
             <h2 className="font-semibold text-sm uppercase tracking-wide text-muted">
               Content Preview
               {revision > 0 && (
                 <span className="ml-2 text-xs font-normal text-primary bg-blue-50 px-2 py-0.5 rounded">Rev {revision}</span>
               )}
+              {isBanner && (
+                <span className="ml-2 text-xs font-normal text-muted">728×90</span>
+              )}
             </h2>
-            <span className="text-xs text-muted">Rendered in sandboxed iframe</span>
+            <div className="flex items-center gap-2">
+              {isBanner && (
+                <div className="flex items-center gap-1">
+                  <span className="text-xs text-muted">Zoom:</span>
+                  {[100, 150, 200].map((z) => (
+                    <button
+                      key={z}
+                      onClick={() => setBannerZoom(z)}
+                      className={`text-xs px-2 py-1 rounded transition-colors ${
+                        bannerZoom === z
+                          ? "bg-primary text-white"
+                          : "bg-gray-100 text-muted hover:bg-gray-200"
+                      }`}
+                    >
+                      {z}%
+                    </button>
+                  ))}
+                </div>
+              )}
+              <span className="text-xs text-muted">Sandboxed iframe</span>
+            </div>
           </div>
-          <iframe ref={iframeRef} title="HTML Preview" className="w-full border-0"
-            style={{ minHeight: 560 }} sandbox="allow-same-origin" />
+          <div
+            className="flex items-center justify-center bg-[#f6f7fb]"
+            style={{
+              minHeight: isBanner ? Math.max(220, 90 * (bannerZoom / 100) + 60) : 120,
+              padding: isBanner ? 24 : 16,
+            }}
+          >
+            {isBanner ? (
+              <div
+                className="border border-gray-200 bg-white shadow-sm overflow-hidden"
+                style={{
+                  width: 728,
+                  height: 90,
+                  transform: `scale(${bannerZoom / 100})`,
+                  transformOrigin: "center center",
+                }}
+              >
+                <iframe
+                  ref={iframeRef}
+                  title="HTML Preview"
+                  className="border-0 block"
+                  style={{ width: 728, height: 90 }}
+                  sandbox="allow-same-origin"
+                />
+              </div>
+            ) : (
+              <div className="w-full max-w-2xl flex justify-center">
+                <iframe
+                  ref={iframeRef}
+                  title="HTML Preview"
+                  className="w-full border border-gray-200 bg-white shadow-sm"
+                  style={{
+                    minHeight: iframeHeight ?? 560,
+                    height: iframeHeight ?? undefined,
+                  }}
+                  sandbox="allow-same-origin"
+                />
+              </div>
+            )}
+          </div>
         </section>
       )}
 
@@ -429,15 +570,19 @@ export default function PreviewPage() {
       )}
 
       {/* Version History */}
-      {versions.length > 0 && (
-        <section className="bg-surface border border-border rounded-lg p-5">
-          <h2 className="font-semibold text-sm uppercase tracking-wide text-muted mb-3">
-            Version History ({versions.length} revision{versions.length !== 1 ? "s" : ""})
-          </h2>
+      <section className="bg-surface border border-border rounded-lg p-5">
+        <h2 className="font-semibold text-sm uppercase tracking-wide text-muted mb-3">
+          Version History
+        </h2>
+        {versions.length === 0 ? (
+          <p className="text-sm text-muted">No versions yet. Generate content to create your first version.</p>
+        ) : (
           <ul className="space-y-2">
             {versions.map((v) => (
               <li key={v.id}
-                className="flex items-center justify-between border border-border rounded-md px-4 py-3 hover:bg-[#fafbfc] transition-colors">
+                className={`flex items-center justify-between border rounded-md px-4 py-3 transition-colors ${
+                  revision === v.revision_number ? "border-primary bg-blue-50/50" : "border-border hover:bg-[#fafbfc]"
+                }`}>
                 <div className="text-sm flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
                     <span className="text-xs font-mono bg-blue-50 text-primary px-1.5 py-0.5 rounded">
@@ -451,12 +596,14 @@ export default function PreviewPage() {
                   <span className="text-foreground text-xs truncate block">{v.html_preview}</span>
                 </div>
                 <button onClick={() => handleLoadVersion(v.id)} disabled={loading === "load"}
-                  className="text-xs text-primary-light hover:underline cursor-pointer ml-3 shrink-0">Load</button>
+                  className="text-xs text-primary-light hover:underline cursor-pointer ml-3 shrink-0">
+                  {revision === v.revision_number ? "Current" : "Load"}
+                </button>
               </li>
             ))}
           </ul>
-        </section>
-      )}
+        )}
+      </section>
     </div>
   );
 }
