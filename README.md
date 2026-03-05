@@ -121,17 +121,19 @@ User clicks "Export Package"
 
 ## Quick Start
 
-**Backend** (port 8000)
+**Backend**
 ```bash
 cd backend && python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # Set ANTHROPIC_API_KEY
+# Set ANTHROPIC_API_KEY in .env file
 uvicorn main:app --reload --port 8000
 ```
 
-**Frontend** (port 3000)
+**Frontend**
 ```bash
-cd frontend && npm install && npm run dev
+cd frontend 
+npm install
+npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000). Run `POST /ingest` to load claims and assets.
