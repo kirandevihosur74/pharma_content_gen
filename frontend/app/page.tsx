@@ -71,7 +71,7 @@ export default function LandingPage() {
     <div className="flex flex-col items-center justify-center min-h-[80vh] gap-8">
       <div className="text-center space-y-3">
         <p className="text-xs uppercase tracking-widest text-muted font-medium">
-          Solistic Health &middot; Content Studio
+          Content Studio
         </p>
         <h1 className="text-4xl font-bold tracking-tight text-primary">
           FRUZAQLA<sup className="text-lg">&reg;</sup> Content Generator

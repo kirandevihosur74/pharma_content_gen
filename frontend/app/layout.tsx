@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "FRUZAQLA Content Generator — Solistic Health",
+  title: "FRUZAQLA Content Generator",
   description: "Generate FDA-compliant pharma marketing content from approved claims and clinical literature",
 };
 
@@ -28,7 +28,7 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         <nav className="bg-primary text-white px-6 py-3 flex items-center gap-4 text-sm shadow-sm">
-          <a href="/" className="font-bold text-base tracking-tight">Solistic Health</a>
+          <a href="/" className="font-bold text-base tracking-tight">FRUZAQLA</a>
           <span className="opacity-30">|</span>
           <span className="text-xs opacity-60">FRUZAQLA Content Studio</span>
           <div className="flex-1" />
